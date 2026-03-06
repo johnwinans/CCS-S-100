@@ -1,6 +1,6 @@
 # Assembling MOSS 2.2
 
-This is an attempt to verifiably re-create the MOSS 2.2 ROM binary image on the CalComp 2422 FDC card
+This is an attempt to verifiably re-create the MOSS 2.2 ROM binary image on the CCS 2422 FDC card
 using the source-code in the 2422 manual.
 
 The rationale for this is to certify that porting the source from the CP/M `MAC.COM` to `ZMAC` 
