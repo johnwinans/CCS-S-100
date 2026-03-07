@@ -1,8 +1,8 @@
 ;
-        TITLE   'DISK MOSS 3.0 MONITOR'
+        TITLE   'DISK MOSS 3 MONITOR'
 ;        MACLIB  Z80
 ;        PAGE    68
-        ORG     0B000H
+        ORG     08000H
 MOSS:   EQU     $
 ROM:    EQU     $       ;ROM START ADDRESS
 WSVEC:  EQU     0       ;VECTOR FOR WARM RESTART
@@ -105,7 +105,7 @@ CONST:  JMP     CSTS    ;CONSOLE STATUS
 ;
 TBL:    DW      ASGN
         DW      BOOT
-        DW      TIHEX 
+        DW      QPRT
         DW      DISP
         DW      QPRT
         DW      FILL
@@ -126,9 +126,9 @@ TBL:    DW      ASGN
         DW      QPRT
         DW      COMP
         DW      WRITE
-        DW      RIHEX 
+        DW      XMNE
         DW      I8250
-        DW      QPRT
+        DW      BYE
 ;
 ; THE COLD INITIALIZATION CODE
 ;
@@ -251,7 +251,7 @@ EX2:    XTHL            ;PUT UNDER RETURN ADDRESS ON STACK
         CALL    P2C     ;TEST FOR DELIMITER
         JRNC    EX3     ;JUMP IF NOT CARRIAGE RETURN
         DJNZ    QPRT    ;CARRET WITH MORE PARAM MEANS ERROR
-	RET
+        RET
 ;
 ; MAIN ACTION ROUTINES
 ;
@@ -367,6 +367,21 @@ ACT:    DB      'C'     ;LOGIPAL CONSOLE DEVICE TABLE
         DB      'C'     ;CONSOLE TO CRT
         DB      'T'     ;CONSOLE TO TTY
 ;
+; THE BYE ROUTINE IS USED TO PREVENT UNAUTHORIZED USAGE
+;       OF THE SYSTEM.  THE SYSTEM LOCKS UP AND WILL NOT
+;       RESPOND TO ANYTHING OTHER THAN TWO ASCII BELL
+;       CHARACTERS.  WHEN IT SEES THEM CONSECUTIVELY,
+;       CONTROL IS RETURNED TO THE MONITOR WITHOUT ALTERING
+;       ANYTHING.
+;
+BYE:    MVI     B,2     ;SET UP FOR TWO CHARACTERS
+BYE1:   CALL    CONI    ;GO READ THE CONSOLE
+        CP      BELL    ;SEE IF AN ASCII BELL
+        JRNZ    BYE     ;NO, START OVER AGAIN
+        CALL    ECH1    ;ECHO THE BELL
+        DJNZ    BYE1    ;NOT YET, GET NEXT ONE
+        RET             ;RETURN TO MONITOR
+;
 ;  COMPARE ROUTINE
 ;
 ;THIS ROUTINE COMPARES TWO BLOCKS OF MEMORY AGAINST EACH
@@ -452,8 +467,54 @@ TRPL1:  CALL    BLK     ;DO THE SPACING
 ;   AS WELL AS ALLOWING ANY CONSOLE INPUT TO BREAKPOINT
 ;   THE RUN, AS LONG AS INTERRUPT 1 IS ACTIVE.
 ;
-GOTO:   CALL    EXPR1   ;GET NEW GOTO ADDRESS
-	POP	H
+GOTO:   CALL    PCHK    ;SEE IF OLD ADDRESS WANTED
+        JRC     GO3     ;       YES, JUMP
+        JRZ     GO0     ;       YES, BUT SET SOME PARAMS
+        CALL    EXF     ;GET NEW GOTO ADDRESS
+        POP     D
+        LXI     H,PLOC  ;PUT ADDRESS IN PC LOCATION
+        DAD     SP
+        MOV     M,D     ;LOW BYTE
+        DCX     H
+        MOV     M,E     ;HIGH BYTE
+        MOV     A,C
+        CP      CR      ;SEE IF A CR WAS LAST ENTERED
+        JRZ     GO3
+GO0:    MVI     B,NBKPTS
+        LXI     H,TLOC  ;POINT TO TRAP STORAGE
+        DAD     SP
+GO1:    PUSH    B       ;SAVE NUMBER OF BREAKPOINTS
+        PUSH    H       ;SAVE STORAGE POINTER
+        MVI     B,2     ;SET UP TO GET A TRAP ADDRESS
+        CALL    EXPR1   ;GET A TRAP ADDRESS
+        POP     D       ;GET THE TRAP ADDRESS INTO (D,E)
+        POP     H       ;REGET THE STORAGE ADDRESS
+        MOV     A,D     ;INSURE THE TRAP ADDRESS ISN'T ZERO
+        ORA     E
+        JRZ     GO2     ;JUMP IF SO
+        MOV     M,E     ;SAVE THE BREAKPOINT ADDRESS
+        INX     H
+        MOV     M,D
+        INX     H
+        LDAX    D       ;SAVE THE INSTRUCTION FROM THE BP ADDRESS
+        MOV     M,A
+        INX     H
+        MVI     A,RST OR 8      ;INSERT THE BREAKPOINT
+        STAX    D
+GO2:    MOV     A,C     ;REGET THE DELIMITER TO SEE
+        CP      CR      ;  IF WE ARE DONE SETTING BREAKPOINTS
+        POP     B       ;  UNLOAD THE STACK FIRST
+        JRZ     GO3     ;YES, JUMP
+        DJNZ    GO1     ;JUMP IF NOT AT BP LIMIT
+GO3:    CALL    CRLF
+        POP     H       ;GET RID OF STACK JUNK
+        LXI     H,RS9
+        PUSH    H
+        LXI     H,REST
+        SHLD    9       ;SET BREAKPOINT JUMP VECTOR ADDRESS
+        LXI     H,24    ;FIND REGISTER SET ROUTINE ADDRESS
+        DAD     SP
+        POP     D       ;ADJUST THE STACK
         PCHL            ;GO TO THE DESIRED PLACE
 ;
 ; GENERAL PURPOSE INPUT/OUTPUT ROUTINES
@@ -554,6 +615,126 @@ BITS1:  MOV     A,E     ;GET NEXT BIT
         DJNZ    BITS1   ;DO IT AGAIN
         POP     D
         RET
+;
+; EXAMINE REGISTERS COMMAND INSPECTS THE VALUES OF THE
+;   REGISTERS STORED BY THE LAST ENCOUNTERED BREAKPOINT.
+;   THE VALUES MAY BE MODIFIED IF DESIRED.
+;
+XAA:    INX     H       ;SKIP OVER TO NEXT ENTRY
+        INX     H
+XA:     INR     M       ;SEE IF AT END OF TABLE
+        RZ              ;COULDN'T FIND MATCH, QUIT
+        JP      P,XAB   ;SORT OUT BIT 7 OF TABLE
+        ORI     80H     ;SET IT ON TEST VALUE
+        JR      XAC
+XAB:    ANI     7FH     ;RESET BIT 7
+XAC     DCR     M       ;TO BE PULLED OUT IN ROM
+        CMP     M       ;SEE IF THIS IT IT
+        JRNZ    XAA     ;NO, GO TRY AGAIN
+        CALL    BLK     ;YES, PREPARE TO SHOW CURRENT VALUE
+        CALL    PRTVAL  ;GO PRINT THE VALUE
+        CALL    DASH    ;PROMPT A NEW VALUE
+        CALL    PCHK    ;GET THE INPUT
+        RC              ;DONE IF CARRIAGE RETURN
+        JRZ     XF      ;JUMP IF NO CHANGE DESIRED
+        PUSH    H       ;TO BE CHANGED, SAVE POINTER
+        CALL    EXF     ;GET THE NEW VALUE
+        POP     H       ;  INTO (H,L)
+        MOV     A,L     ;GET THE NEW LOW BYTE
+        INX     D       ;ADJUST THE POINTER
+        STAX    D       ;PUT IT DOWN
+        XTHL            ;RECOVER THE TABLE POINTER
+        MOV     A,M     ;GET THE ATTRIBUTES
+        XTHL            ;SET THE STACK STRAIGHT
+        RLCA            ;SEE IF 8 BIT REGISTER
+        JRNC    XE      ;JUMP IF SO
+        INX     D       ;REGISTER PAIR, DO OTHER 8 BITS
+        MOV     A,H
+        STAX    D
+XE:     POP     H       ;RESTORE THE TABLE POINTER
+XF:     MOV     A,C     ;SEE IF IT WAS A CR
+        CP      CR
+        RZ              ;DONE IF SO
+XMNE:   LXI     H,ACTBL ;GET ADDRESS OF REGISTER LOOK-UP TABLE
+XMNE1:  CALL    PCHK    ;FIND OUT WHAT ACTION IS WANTED
+        JRC     XG      ;SHOW ALL IF CARRIAGE RETURN
+        JRZ     XMNE1   ;IGNORE BLANKS OR COMMAS
+        CP      ''''    ;SEE IF PRIMES WANTED
+        JRNZ    XA      ;NO, MUST BE A SINGLE REGISTER
+        LXI     H,PRMTB ;YES, SET TABLE ADDRESS
+        JR      XMNE1   ;  AND FIND OUT WHICH ONE
+;
+XG:     MOV     A,M
+        MOV     C,A
+        INR     A       ;SEE IF AT END OF TABLE
+        RZ              ;DONE IF SO
+        CM      CRLF    ;START A NEW LINE IF BIT 7 IS SET
+        CALL    CONOUT
+        CALL    DASH    ;PROMPT FOR A NEW VALUE
+        CALL    PRTVAL  ;GO PRINT THE VALUE
+        CALL    BLK     ;FORMATTER
+        INX     H       ;POINT TO NEXT ENTRY
+        JR      XG      ;DO THE NEXT VALUE
+;
+PRTVAL: INX     H       ;POINT TO NEXT ENTRY
+        MOV     A,M     ;GET OFFSET AND ATTRIBUTES BYTE
+        ANI     3FH     ;ISOLATE THE OFFSET
+        ADI     2       ;ALLOW FOR RETURN ADDRESS
+        XCHG            ;SWAP POINTERS
+        MOV     L,A     ;BUILD THE ADDRESS OF THE REG CONTENTS
+        MVI     H,0     
+        DAD     SP
+        XCHG            ;RE-SWAP THE POINTERS
+        MOV     A,M     ;NOW FIND OUT ATTRIBUTES
+        MVI     B,1     ;SET UP FOR SINGLE REG VALUE
+        RLCA
+        JRNC    PV1     ;JUMP IF SINGLE REGISTER VALUE WANTED
+        INR     B       ;SET UP FOR REGISTER PAIR
+        RLCA
+        JRNC    PV1     ;JUMP IF REGISTER PAIR IS NEXT
+        PUSH    H       ;SPECIAL CASE FOR MEMORY REGISTER
+        LDAX    D       ;BUILD ADDRESS IN (H,L)
+        MOV     H,A
+        DCX     D
+        LDAX    D
+        MOV     L,A
+        MOV     A,M     ;GET THE MEMORY VALUE
+        POP     H       ;RESTORE (H,L)
+        DJNZ    PV2     ;ALWAYS JUMP
+PV1:    LDAX    D       ;GET THE REGISTER CONTENTS
+PV2:    CALL    HEX1    ;OUTPUT THE VALUE
+        DCX     D       ;ADJUST THE MEMORY POINTER
+        DJNZ    PV1
+        RET
+;
+ACTBL:  DB      80H+'A',ALOC
+        DB      'B',BLOC
+        DB      'C',CLOC
+        DB      'D',DLOC
+        DB      'E',ELOC
+        DB      'F',FLOC
+        DB      'H',HLOC
+        DB      'L',LLOC
+        DB      80H+'M',HLOC+0C0H
+        DB      'P',PLOC+80H
+        DB      'S',SLOC+80H
+        DB      'I',ILOC
+;
+; REST OF Z-80 REGISTER OFFSETS
+;
+PRMTB:  DB      80H+'A',APLOC
+        DB      'B',BPLOC
+        DB      'C',CPLOC
+        DB      'D',DPLOC
+        DB      'E',EPLOC
+        DB      'F',FPLOC
+        DB      'H',HPLOC
+        DB      'L',LPLOC
+        DB      80H+'M',HPLOC+0C0H
+        DB      'X',XLOC+80H
+        DB      'Y',YLOC+80H
+        DB      'R',RLOC
+        DB      0FFH
 ;
 ; GENERAL PURPOSE ROUTINES
 ;
@@ -800,38 +981,75 @@ DERMSG: DB      'DSK ERR: U','-'+80H
         DB      ' E','-'+80H
         DB      CR,LF+80H
 QMSG:   DB      '???','?'+80H
-LOGMSG: DB      'MOSS VERS 3'
+LOGMSG: DB      'JW MOSS 3'
         DB      CR,LF+80H
 ;
 ; INITIALIZATION CODE FOR THE 8250 ASYNCHRONOUS COMMUNICATION
 ;   ELEMENT.  THIS CODE WILL INITIALIZE THE BAUD RATE OF THE
 ;   8250, AS WELL AS THE WORD FORMAT.  8 DATA BITS, 1 STOP BIT,
-;   AND NO PARITY ARE SELECTED.
+;   AND NO PARITY ARE SELECTED.  EITHER 2 OR 3 CARRIAGE RETURNS
+;   MUST BE ENTERED TO ESTABLISH THE CORRECT BAUD RATE.
 ;
-B300    EQU     384		;BAUD RATE DIVISORS FOR 8250'S
-B600    EQU     192
-B1200   EQU     96
-B2400   EQU     48
-B4800   EQU     24
-B9600   EQU     12
-B19200  EQU     6
-B38400  EQU     3
-BAUD	EQU	B38400		;SELECTED BAUD RATE
-I8250:	MVI	A,0FH	;SET UP 8250 DSR,CTS,CD
-	OUT	SMDMCT	
-	MVI	A,83H	;SET DIVISOR REGISTER ACCESS
-	OUT     SLCTRL	
-	LXI	H,BAUD	;GET BAUD RATE
-	MOV	A,L	;BAUD LOW
-	OUT	SDATA	
-	MOV	A,H	;BAUD HIGH
-	OUT	SINTEN	
-	MVI	A,3	;SET THE REGISTER ACCESS
-	OUT	SLCTRL	
-	XRA     A	;DISABLE INTERRUPTS	
-	OUT	SINTEN	
-	OUT	SLSTAT	;AND RESET ERROR FLAGS
-	RET	
+I8250:  MVI     A,0FH   ;SET UP THE 8250
+        OUT     SMDMCT
+        LXI     D,40H   ;SET UP TO TIME THE START BIT
+        MOV     H,D     ;MAKE (H,L)=0
+        MOV     L,D
+I8250A: IN      SMDMST  ;WAIT FOR START BIT
+        ANA     E
+        JRZ     I8250A
+I8250B: IN      SMDMST  ;NOW,TIME THE START BIT DURATION
+        INX     H
+        ANA     E
+        ANA     E
+        JNZ     I8250B
+        PUSH    H       ;SAVE COUNT INT CASE OF 4 MHZ
+        DAD     H       ;PREPARE THE 2 MHZ DIVISOR
+        MOV     E,H     ;SET UP THE FUDGE FACTOR
+        DAD     D       ;APPLY THE FUDGE FACTOR
+        DAD     D
+        PUSH    H       ;SAVE FOR LATER USE
+        DAD     H       ;WAIT FOR 8 BIT TIMES
+        DAD     H
+I8250C: IN      SDATA   ;WASTE SOME TIME
+        DCX     H
+        MOV     A,L
+        ORA     H
+        JNZ     I8250C
+        POP     H       ;REGET 2 MHZ DIVISOR
+I8250D: MVI     A,83H   ;SET DIVISOR REGISTER ACCESS
+        OUT     SLCTRL
+        MOV     A,H
+        OUT     SINTEN
+        MOV     A,L     ;SET THE DIVISOR
+        OUT     SDATA
+        MVI     A,3     ;SET THE REGISTER ACCESS
+        OUT     SLCTRL
+        XRA     A       ;DISABLE INTERRUPTS
+        OUT     SINTEN
+        OUT     SLSTAT  ;AND RESET ERROR FLAGS
+        CALL    TTYIN   ;GET A CHARACTER
+        ANI     7FH     ;STRIP OFF ANY PARITY BIT
+        CP      0DH     ;SEE IF IT IS A CARRIAGE RETURN
+        POP     H       ;SET THE STACK STRAIGHT
+        RZ              ;DONE IF CARRIAGE RETURN RECEIVED
+        MOV     E,L     ;ELSE, MUST BE 4 MHZ SYSTEM
+        MOV     D,H     ; DO, COUNT=COUNT*5/4
+        CALL    DIV2
+        CALL    DIV2
+        DAD     D
+        PUSH    H
+        JR      I8250D  ;GO SET THE NEW DIVISOR
+;
+;
+DIV2:   ORA     A       ;CLEAR THE CARRY BIT
+        MOV     A,H     ;DO A 16 BIT RIGHT SHIFT
+        RAR
+        MOV     H,A
+        MOV     A,L
+        RAR
+        MOV     L,A
+        RET
 ;
 ;
 READ:   MVI     A,1     ;SET THE READ/WRITE FLAG
@@ -847,7 +1065,7 @@ RW1:    LDA     RWFLAG
         JRNZ    RW2     ;JUMP IF READ
         SHLD    HSTBUF  ;SET THE WRITE SOURCE BUF
         CALL    DWRITE  ;ELSE, DO THE WRITE
-        JR	RW3
+        JR      RW3
 RW2:    CALL    DREADH  ;DO THE READ
 RW3:    POP     D
         JRNZ    DERROR  ;JUMP IF ERROR
@@ -994,235 +1212,20 @@ LADR:   MOV     A,H     ;GET HIGH TWO DIGITS
         CALL    HEX1    ;PRINT THEM
         MOV     A,L     ;GET LOW TWO DIGITS
 HEX1:   PUSH    PSW     ;SAVE THE LOW DIGIT
-        RRCA            ;PUT HIGH NIBBLE INTO BITS 0-3
+        RRCA             ;PUT HIGH NIBBLE INTO BITS 0-3
         RRCA
         RRCA
         RRCA
         CALL    HEX2    ;GO PRINT SINGLE DIGIT
         POP     PSW     ;REGET THE LOW DIGIT
 HEX2:   CALL    CONV    ;GO INSERT ASCII ZONE
-        JMP     CO      ;DO THE CHARACTER OUTPUT
+        JR      CO      ;DO THE CHARACTER OUTPUT
 ;
 ; ROUTINE DASH TYPES A DASH ON THE CURRENT CONSOLE DEVICE
 ;
 DASH1:  CALL    HEX1    ;FIRST, PRINT ACCUM AS TWO HEX DIGITS
 DASH:   MVI     C,'-'   ;GET AN ASCII DASH
-        JMP     CO      ;GO TYPE IT
-;
-; NON-CCS FUNCTIONALITY
-;
-;------------------------------------------------------------------------------
-; S A V E  I N T E L  H E X
-; Although your original Monitor Rom has a command to LOAD an Intel Hex file
-; thru the Serial A port (usually by sending it from your PC using Hyperterm)
-;  there was no mechanism to save a program back once you debugged it.
-;
-; This routine saves an area of memory as Intel Hex, sending the data string
-; out the Serial Port A (TTY)
-; You may JP directly to the "SAVE" mnemonic - on entry HL=Start of Save, 
-; DE=End of Save
-; You will have to tell Hyperterminal to "Capture Text to File" in order to
-; save the data to your PC, PRIOR to running this code, and you will have to
-; edit this file to get rid ofthe keystrokes in front of the ":" data line
-; and any spurious stuff at the end. VERY IMPORTANT because the LOAD command
-; is not very tolerant of junk aside from the actual Intel Hex codes.
-;------------------------------------------------------------------------------
-TIHEX:  CALL    EXLF            ; NEW LINE
-;------------------------------------------------------------------------------
-; HL=Starting address of area to be saved
-; DE=Ending address of area to be saved 
-;------------------------------------------------------------------------------
-SAVE:   XRA     A               ; CLEAR ACCUM AND FLAGS
-        PUSH    H              ; TEMP SAVE START ADDRESS
-        MOV     A,D
-        SBB     H
-        MOV     D,A
-        MOV     A,E
-        SBB     L
-        MOV     E,A             ; DE HAS SIZE
-        POP     H               ; PUT START ADDRESS INTO HL
-; SAVE1:  MOV     A,D              ARE WE SAVING < $100 BYTES?
-SAVE1:  MOV     A,D             ; ARE WE SAVING < $100 BYTES?
-	ORA	A
-	JNZ	SAVE2
-	MOV	A,E
-	SUI	010H
-        JC      LSTREC          ; LAST RECORD
-	ANA	A
-	JZ	LSTREC
-SAVE2:  MVI     A,010H          ; OTHERWISE, RECORD LENGTH = $FF
-        CALL    DMPREC          ; WRITE THE NEXT $FF BYTES RECORD
-        JR      SAVE1           ; KEEP GOING UNTIL FINISHED     
-LSTREC: MOV     A,E             ; BETWEEN $00 AND $FF BYTES LEFT TO SAVE
-        CALL    DMPREC          ; DUMP THE FINAL RECORD
-	CALL	CRLF		; CREATE THE CLOSING LINE
-        MVI     C,':'           ; EOF LINE
-        CALL    CONOUT
-        XRA     A               ; RECORD LENGTH = $00
-        CALL    HEXOUT          ; OUTPUT IT
-        XRA     A               ; ADDRESS=$0000
-        CALL    HEXOUT          ; OUTPUT IT
-        XRA     A               ; OUTPUT IT AGAIN
-        CALL    HEXOUT          ; FINISH ADDRESS
-        MVI     A,01H           ; EOF INDICATION
-        CALL    HEXOUT          ; OUTPUT THAT
-        MVI     A,0FFH          ; FAKE THE CHECKSUM
-        CALL    HEXOUT 
-        MVI     C,LF            ; LF
-        CALL    CONOUT
-        RET                     ; FINISHED AT LAST
-;------------------------------------------------------------------------------
-; ENTER WITH A=# OF BYTES IN RECORD, HL POINTS AT START OF RECORD TO SAVE
-;------------------------------------------------------------------------------
-DMPREC: MOV     B,A             ; SAVE LENGTH IN B
-        PUSH    B
-	CALL	CRLF		; CRLF
-        MVI     C,':'           ; COLON IS START OF LINE
-        CALL    CONOUT
-        POP     B
-        MOV     A,B             ; GET LENGTH BACK
-        MOV     C,A             ; START THE CHECKSUM
-        PUSH    B
-        CALL    HEXOUT          ; WRITE (ACCUM) THE LENGTH OUT
-        CALL    HLHEX           ; OUTPUT HL IN HEX
-        POP     B
-        MOV     A,C             ; GET CHECKSUM
-        ADD     H               ; ADD HIGH ADDRESS
-        ADD     L               ; ADD LOW  ADDRESS
-        MOV     C,A             ; SAVE NEW CHECKSUM
-        XRA     A               ; DATA TYPE = $00
-        PUSH    B
-        CALL    HEXOUT          ; OUTPUT THE BYTE
-        POP     B
-;       INR     B                BUMP COUNTER TO GET LAST BYTE
-MEMHEX: MOV     A,M             ; GET MEMORY CONTENTS
-        PUSH    B
-        CALL    HEXOUT          ; AND OUTPUT
-        POP     B
-        MOV     A,M             ; GET MEMORY CONTENTS AGAIN
-        ADD     C               ; ADD TO CHECKSUM
-        MOV     C,A             ; STORE NEW CHECKSUM
-        INX     H               ; NEXT MEMORY LOCATION
-        DCX     D
-        DJNZ    MEMHEX          ; CONTINUE UNTIL RECORD SAVED
-        MOV     A,C             ; RETRIEVE CHECKSUM
-        XRI     0FFH            ; XOR 0xFF
-        INR     A               ; CREATE TWO'S COMPLEMENT
-        PUSH    B
-        CALL    HEXOUT          ; WRITE CHECKSUM OUT
-        POP     B
-        RET     
-HLHEX:  MOV     A,H             ; GET H
-        CALL    HEXOUT          ; CONVERT IT
-        MOV     A,L
-HEXOUT: PUSH    PSW              ;Convert the upper nybble to Hex ASCII first
-        RAR                     ;Slowly
-        RAR                     ; Rotate
-        RAR                     ;  It
-        RAR                     ;   Over to the right
-        CALL    HEXOP           ;Convert the nybble D3-D0 to Hex ASCII
-        POP     PSW              ;Retrieve the original value and convert the lower nybble
-HEXOP:  ANI     0FH             ;Convert the nybble at D3-D2-D1-D0 to Hex ASCII char
-        CP      10              ;Neat trick for converting nybble to ASCII
-        SBI     069H
-        DAA                     ;Uses DAA trick
-        MOV     C,A
-        CALL    CONOUT
-        RET
-;
-;
-; LOADS A RECORD IN INTEL HEX FORMAT
-;
-;
-RIHEX:  MVI     D,0FFH
-        MVI     C,LF  
-	CALL    CONOUT  	;ADVANCE TO A NEW LINE
-LODLP:	INR	D		;ADVANCE NUMBER OF RECORDS DUMPED
-	MOV	A,D		;GET NUMBER OF RECORDS DUMPED
-        MOV     C,A
-	CALL	HEX1		;DISPLAY ON TERMINAL
-	CALL	GIHEX		;GET NEXT RECORD
-	RNC			;IF END, GET NEXT COMMAND
-	MVI	C,CR		;GET CARRIAGE RETURN
-	CALL	CONOUT		;BACK UP TO START OF LINE
-	JMP	LODLP		;GET NEXT RECORD
-GIHEX:  CALL    CONIN           ;GET CHARACTER FROM TAPE
-        CP      ':'             ;TEST FOR START OF RECORD
-        JNZ     GIHEX           ;IF NOT, IGNORE
-        CALL    GETBYT          ;GET LENGTH
-        ANA     A               ;TEST FOR END OF FILE
-        RZ 
-        MOV     C,A             ;START CHECKSUM
-        MOV     B,A             ;REMEBMER LENGTH
-        CALL    GETHL           ;GET ADDRESS
-        MOV     A,C             ;GET CHECKSUM
-        ADD     H               ;ADD HIGH BYTE OF ADDRESS
-        ADD     L               ;ADD LOW BYTE OF ADDRESS
-        MOV     C,A             ;RESAVE CHECKSUM
-        CALL    GETBYT          ;GET TYPE BYTE
-        ADD     C               ;ADD TO CHECKSUM
-        MOV     C,A             ;RESAVE CHECKSUM
-NEOR:   CALL    GETBYT          ;GET DATA BYTE
-        MOV     M,A             ;SAVE IN MEMORY
-        INX     H               ;POINT TO NEXT LOCATION
-        ADD     C               ;ADD TO CHECKSUM
-        MOV     C,A             ;RESAVE CHECKSUM
-        DCR     B               ;REDUCE COUNT OF REMAINING DATA BYTES
-        JNZ     NEOR            ;IF MORE, KEEP LOADING
-        CALL    GETBYT          ;GET CHECKSUM. (FROM TAPE)
-        ADD     C               ;ADD TO COMPUTED CHECKSUM
-        JZ      EIPL            ;IF OK, END THIS RECORD
-;       CALL    RSET            ;CLEAR FLAGS
-        LXI     H,IOMSG         ;GET ADDRESS OF I/O ERROR MSG
-        JMP     COMERR          ;GO PROCESS IT
-        ANA     A               ;INDICATE END OF LOAD ???
-        RET
-; INDICATE END OF RECORD, MORE DATA TO FOLLOW CY=1
-EIPL:   STC                     ;INDICATE MORE DATA
-        RET
-; GET'S A 16 BIT VALUE FOR H-L, CY=1 IF EVERYTHING OK
-GETHL:  CALL    GETBYT          ;GET FIRST BYTE
-        RNC                     ;IF BAD, DON'T WAIT FOR SECOND
-        MOV     H,A             ;SAVE IN HIGH BYTE OF RESULT
-        CALL    GETBYT          ;GET SECOND BYTE
-        MOV     L,A             ;SAVE IN LOW BYTE OF RESULT
-        RET
-; GETS A BYTE FOR ACC FROM TERMINAL, CY=0 IF FAILS
-GETBYT: PUSH    B               ;SAVE B-C PAIR
-        CALL    GETNIB          ;GEET FIRST NIBBLE
-        JNC     RETGB           ;IF BAD, DON'T WAIT FOR MORE
-        RLCA                    ;SHIFT INTO.
-        RLCA                    ;UPPER NIBBLE.
-        RLCA                    ;OF RESULT.
-        RLCA                    ;SO WE CAN INSERT LOWER NIBBLE
-        MOV     B,A             ;KEEP HIGH DIGIT IN B
-        CALL    GETNIB          ;GET SECOND DIGIT
-        JNC     RETGB           ;IF BAD, INDICATE SO
-        ORA     B               ;INSERT HIGH DIGIT
-        STC                     ;INDICATE SUCESS
-RETGB:  POP     B               ;RESTORE B-C PAIR
-        RET
-; GETS A NIBBLE FROM THE TERMINAL (IN ASCII HEX)
-GETNIB: CALL    CONIN           ;GET A CHARACTER
-        CP      ' '             ;TEST FOR BLANK (ABORT1)
-        RZ                      ;IF SO, RETURN INDICATING BAD (CY=0)
-        CP      CR              ;TEST FOR <CR> (ABORT2)
-        RZ                      ;IF SO, RETURN INDICATING BAD
-        CP      030H            ;TEST FOR INVALID (BELOW '0')
-        JC      GETNIB          ;IF SO, WAIT FOR MORE
-        CP      'G'             ;TEST FOR INVALID (GREATER THAN 'F')
-        JNC     GETNIB          ;IF SO, IGNORE
-        MOV     C,A
-        CALL    CONOUT          ;DISPLAY CHARACTER
-        CP      03AH            ;TEST FOR INVALID
-        JC      NUMH            ;IF OK, WE ARE IN
-        CP      'A'             ;TEST FOR INVALID
-        JC      GETNIB          ;IF BAD, IGNORE
-        SUI     7               ;CONVERT TO DIGIT
-NUMH:   SUI     030H            ;CONVERT TO BINARY
-        STC                     ;INDICATE SUCESS
-        RET
-
+        JR      CO      ;GO TYPE IT
 ;
 ; IOBYTE HANDLERS
 ;
@@ -1492,7 +1495,7 @@ SEEK1:  LDA     SECTOR  ;SET THE SECTORE
         IN      DTRCK   ;CHECK FOR TRACK 00
 RDWRT:  ORA     A
         LXI     H,40H   ;BUILD SECTOR BYTE COUNT
-        JRZ     RDWRTO  ;JUMP IF TRACK 00
+;        JRZ     RDWRTO  ;JUMP IF TRACK 00
         LDA     IDSV+3  ;GET SECTOR SIZE
 RDWRTO: DAD     H       ;DOUBLE (H,L)
         DCR     A       ;LOOP CONTROL
@@ -1584,7 +1587,7 @@ SU0:    IN      DTRCK   ;ELSE, SEE IF TRACK ZERO
         ORA     A
         MOV     A,M     ;REGET THE SELBITS
         JRNZ    SU1
-        ANI     0BFH    ;INSURE DDEN IS RESET           (TRK0 = SD ?)
+;        ANI     0BFH    ;INSURE DDEN IS RESET
 SU1:    ORA     C       ;ADD ON AUTOWAIT BIT
         OUT     DCNTL   ;OUTPUT THE SELBITS
         LDA     SIDE    ;SET THE SIDE SELECT
